@@ -1,13 +1,21 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"io/ioutil"
+	"log"
 	"math"
+	"strings"
 
 	"github.com/awalterschulze/gographviz"
 )
 
-var order = 4
+var (
+	order    = flag.Int("order", 5, "the 'look-behind memory' of the Markov chain")
+	filename = flag.String("file", "in.txt", "the file to create a Markov chain from")
+	kind     = flag.String("kind", "word", "the size of a single token/entity. allowed values: word, character, line")
+)
 
 type (
 	state interface{}
@@ -22,20 +30,53 @@ type (
 		children map[state]*countingNode
 	}
 
+	idGen struct {
+		next int
+	}
+
 	tree = node
 
 	countingTree = countingNode
 )
 
 func main() {
+	flag.Parse()
+
+	bytes, err := ioutil.ReadFile(*filename)
+	if err != nil {
+		log.Fatalf("could not open file %s: %v", *filename, err)
+	}
+
+	var (
+		input        = string(bytes)
+		stringTokens = make([]string, 0, 64)
+	)
+
+	switch *kind {
+	case "word":
+		stringTokens = strings.Fields(input)
+
+	case "character":
+		stringTokens = strings.Split(input, "")
+
+	case "line":
+		stringTokens = strings.Split(input, "\n")
+
+	default:
+		log.Fatalf("argument -kind should be 'word', 'character', or 'line'")
+	}
+
+	states := make([]state, len(stringTokens))
+
+	for i, tok := range stringTokens {
+		states[i] = state(tok)
+	}
+
 	tree := &countingTree{
 		children: make(map[state]*countingNode),
 	}
 
-	tree.learnNgrams(
-		[]state{"any", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog", "because", "the", "quick", "orange", "dog", "did", "not", "jump", "over", "any", "animals"},
-		8,
-	)
+	tree.learnNgrams(states, *order)
 
 	probabilityTreeGraph(tree.makeProbabilityTree())
 }
@@ -111,32 +152,31 @@ func (t *countingNode) makeProbabilityTree() *node {
 	}
 }
 
-func (t *countingNode) graphviz(graph *gographviz.Graph, id, name string) {
-	graph.AddNode("G", id, map[string]string{
-		"label": name,
+func (t *node) graphviz(graph *gographviz.Graph, idGen *idGen, name string) {
+	curID := idGen.gen()
+
+	graph.AddNode("G", curID, map[string]string{
+		"label": fmt.Sprintf(`"%s"`, strings.Replace(name, `"`, `\"`, -1)),
 	})
 
 	for state, node := range t.children {
-		childID := fmt.Sprintf("%s_%v", id, state)
-		node.graphviz(graph, childID, fmt.Sprintf("%v", state))
-		graph.AddEdge(id, childID, true, map[string]string{
-			"label": fmt.Sprintf("%v", node.n),
+		childID := idGen.peek()
+
+		node.graphviz(graph, idGen, fmt.Sprintf("%v", state))
+		graph.AddEdge(curID, childID, true, map[string]string{
+			"label": fmt.Sprintf("%v", math.Floor(node.probability*100)/100),
 		})
 	}
 }
 
-func (t *node) graphviz(graph *gographviz.Graph, id, name string) {
-	graph.AddNode("G", id, map[string]string{
-		"label": name,
-	})
+func (i *idGen) gen() string {
+	val := fmt.Sprintf("%d", i.next)
+	i.next++
+	return val
+}
 
-	for state, node := range t.children {
-		childID := fmt.Sprintf("%s_%v", id, state)
-		node.graphviz(graph, childID, fmt.Sprintf("%v", state))
-		graph.AddEdge(id, childID, true, map[string]string{
-			"label": fmt.Sprintf("%v", math.Floor(node.probability*100)/100),
-		})
-	}
+func (i *idGen) peek() string {
+	return fmt.Sprintf("%d", i.next)
 }
 
 func (t *countingNode) String() string {
@@ -147,18 +187,6 @@ func (t *node) String() string {
 	return fmt.Sprintf("(p=%v, children=%v)", t.probability, t.children)
 }
 
-func countingTreeGraph(tree *countingTree) {
-	graphAst, _ := gographviz.ParseString("digraph G {}")
-	graph := gographviz.NewGraph()
-	if err := gographviz.Analyse(graphAst, graph); err != nil {
-		fmt.Println("error generating graphviz graph:", err)
-	}
-
-	tree.graphviz(graph, "start", "start")
-
-	fmt.Println(graph.String())
-}
-
 func probabilityTreeGraph(tree *tree) {
 	graphAst, _ := gographviz.ParseString("digraph G {}")
 	graph := gographviz.NewGraph()
@@ -166,7 +194,7 @@ func probabilityTreeGraph(tree *tree) {
 		fmt.Println("error generating graphviz graph:", err)
 	}
 
-	tree.graphviz(graph, "start", "start")
+	tree.graphviz(graph, new(idGen), "start")
 
 	fmt.Println(graph.String())
 }
