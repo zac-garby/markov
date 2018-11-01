@@ -6,6 +6,8 @@ import (
 	"io/ioutil"
 	"log"
 	"math"
+	"math/rand"
+	"sort"
 	"strings"
 
 	"github.com/awalterschulze/gographviz"
@@ -15,6 +17,8 @@ var (
 	order    = flag.Int("order", 5, "the 'look-behind memory' of the Markov chain")
 	filename = flag.String("file", "in.txt", "the file to create a Markov chain from")
 	kind     = flag.String("kind", "word", "the size of a single token/entity. allowed values: word, character, line")
+	seed     = flag.String("seed", "", "the text to seed the generator with. tokens separated by whitespace")
+	amount   = flag.Int("amount", 8, "the amount of output to generate (e.g. -amount 8 will output 8 words if -kind=word)")
 )
 
 type (
@@ -72,13 +76,64 @@ func main() {
 		states[i] = state(tok)
 	}
 
-	tree := &countingTree{
+	countingTree := &countingTree{
 		children: make(map[state]*countingNode),
 	}
 
-	tree.learnNgrams(states, *order)
+	fmt.Println("training...")
+	countingTree.learnNgrams(states, *order)
+	fmt.Println("done")
 
-	probabilityTreeGraph(tree.makeProbabilityTree())
+	tree := countingTree.makeProbabilityTree()
+
+	var (
+		previous   = make([]state, 0)
+		seedTokens = make([]string, 0)
+	)
+
+	switch *kind {
+	case "word":
+		seedTokens = strings.Fields(*seed)
+
+	case "character":
+		seedTokens = strings.Split(input, "")
+
+	case "line":
+		seedTokens = strings.Split(input, "\n")
+
+	default:
+		log.Fatalf("argument -kind should be 'word', 'character', or 'line'")
+	}
+
+	if len(seedTokens) == 0 {
+		log.Fatalf("argument -seed should be non-empty")
+	}
+
+	for _, tok := range seedTokens {
+		previous = append(previous, state(tok))
+	}
+
+	fmt.Print(*seed)
+	switch *kind {
+	case "word":
+		fmt.Print(" ")
+	case "line":
+		fmt.Print("\n")
+	}
+
+	for i := 0; i < *amount; i++ {
+		next := tree.predict(previous)
+
+		fmt.Print(next)
+		switch *kind {
+		case "word":
+			fmt.Print(" ")
+		case "line":
+			fmt.Print("\n")
+		}
+
+		previous = append(previous[1:], next)
+	}
 }
 
 func (t *countingNode) learn(seq []state) {
@@ -167,6 +222,79 @@ func (t *node) graphviz(graph *gographviz.Graph, idGen *idGen, name string) {
 			"label": fmt.Sprintf("%v", math.Floor(node.probability*100)/100),
 		})
 	}
+}
+
+type stateProbabilityPair struct {
+	state       state
+	probability float64
+}
+
+type byProbability []stateProbabilityPair
+
+func (b byProbability) Len() int           { return len(b) }
+func (b byProbability) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
+func (b byProbability) Less(i, j int) bool { return b[i].probability < b[j].probability }
+
+func (t *tree) predict(previous []state) state {
+	for {
+		prediction, ok := t.predictExact(previous)
+		if ok {
+			return prediction
+		}
+
+		if len(previous) > 1 {
+			previous = previous[1:]
+		} else {
+			return nil
+		}
+	}
+}
+
+func (t *tree) predictExact(previous []state) (prediction state, ok bool) {
+	if len(previous) == 0 {
+		// Make a choice
+		return randomChoice(probPairs(t.children)), true
+	}
+
+	child, ok := t.children[previous[0]]
+	if !ok {
+		return nil, false
+	}
+
+	if len(previous) > 1 {
+		return child.predictExact(previous[1:])
+	}
+
+	return child.predictExact(make([]state, 0))
+}
+
+func probPairs(nodes map[state]*node) []stateProbabilityPair {
+	choices := make([]stateProbabilityPair, 0, len(nodes))
+
+	for state, child := range nodes {
+		choices = append(choices, stateProbabilityPair{
+			state:       state,
+			probability: child.probability,
+		})
+	}
+
+	return choices
+}
+
+func randomChoice(choices []stateProbabilityPair) state {
+	rand := rand.Float64()
+
+	sort.Sort(byProbability(choices))
+
+	for _, pair := range choices {
+		if rand < pair.probability {
+			return pair.state
+		}
+
+		rand -= pair.probability
+	}
+
+	return nil
 }
 
 func (i *idGen) gen() string {
